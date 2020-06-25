@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 import Display
 import TelegramCore
+import SyncCore
 import SwiftSignalKit
 import Photos
 import CoreLocation
@@ -12,6 +13,7 @@ import UserNotifications
 import CoreTelephony
 import TelegramPresentationData
 import LegacyComponents
+import AccountContext
 
 public enum DeviceAccessMicrophoneSubject {
     case audio
@@ -40,14 +42,6 @@ public enum DeviceAccessSubject {
     case notifications
     case siri
     case cellularData
-}
-
-public enum AccessType {
-    case notDetermined
-    case allowed
-    case denied
-    case restricted
-    case unreachable
 }
 
 private let cachedMediaLibraryAccessStatus = Atomic<Bool?>(value: nil)
@@ -230,6 +224,8 @@ public final class DeviceAccess {
                             subscriber.putNext(.denied)
                         case .notDetermined:
                             subscriber.putNext(.notDetermined)
+                        @unknown default:
+                            fatalError()
                     }
                     subscriber.putCompletion()
                     return EmptyDisposable
@@ -248,7 +244,7 @@ public final class DeviceAccess {
         }
     }
     
-    public static func authorizeAccess(to subject: DeviceAccessSubject, registerForNotifications: ((@escaping (Bool) -> Void) -> Void)? = nil, requestSiriAuthorization: ((@escaping (Bool) -> Void) -> Void)? = nil, presentationData: PresentationData? = nil, present: @escaping (ViewController, Any?) -> Void = { _, _ in }, openSettings: @escaping () -> Void = { }, displayNotificationFromBackground: @escaping (String) -> Void = { _ in }, _ completion: @escaping (Bool) -> Void = { _ in }) {
+    public static func authorizeAccess(to subject: DeviceAccessSubject, registerForNotifications: ((@escaping (Bool) -> Void) -> Void)? = nil, requestSiriAuthorization: ((@escaping (Bool) -> Void) -> Void)? = nil, locationManager: LocationManager? = nil, presentationData: PresentationData? = nil, present: @escaping (ViewController, Any?) -> Void = { _, _ in }, openSettings: @escaping () -> Void = { }, displayNotificationFromBackground: @escaping (String) -> Void = { _ in }, _ completion: @escaping (Bool) -> Void = { _ in }) {
             switch subject {
                 case .camera:
                     let status = PGCamera.cameraAuthorizationStatus()
@@ -258,7 +254,7 @@ public final class DeviceAccess {
                                 completion(response)
                                 if !response, let presentationData = presentationData {
                                     let text = presentationData.strings.AccessDenied_Camera
-                                    present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                                    present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                                         openSettings()
                                     })]), nil)
                                 }
@@ -272,7 +268,7 @@ public final class DeviceAccess {
                             text = presentationData.strings.AccessDenied_Camera
                         }
                         completion(false)
-                        present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                        present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                             openSettings()
                         })]), nil)
                     } else if status == PGCameraAuthorizationStatusAuthorized {
@@ -286,24 +282,26 @@ public final class DeviceAccess {
                         completion(true)
                     } else {
                         AVAudioSession.sharedInstance().requestRecordPermission({ granted in
-                            if granted {
-                                completion(true)
-                            } else if let presentationData = presentationData {
-                                completion(false)
-                                let text: String
-                                switch microphoneSubject {
-                                    case .audio:
-                                        text = presentationData.strings.AccessDenied_VoiceMicrophone
-                                    case .video:
-                                        text = presentationData.strings.AccessDenied_VideoMicrophone
-                                    case .voiceCall:
-                                        text = presentationData.strings.AccessDenied_CallMicrophone
-                                }
-                                present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
-                                    openSettings()
-                                })]), nil)
-                                if case .voiceCall = microphoneSubject {
-                                    displayNotificationFromBackground(text)
+                            Queue.mainQueue().async {
+                                if granted {
+                                    completion(true)
+                                } else if let presentationData = presentationData {
+                                    completion(false)
+                                    let text: String
+                                    switch microphoneSubject {
+                                        case .audio:
+                                            text = presentationData.strings.AccessDenied_VoiceMicrophone
+                                        case .video:
+                                            text = presentationData.strings.AccessDenied_VideoMicrophone
+                                        case .voiceCall:
+                                            text = presentationData.strings.AccessDenied_CallMicrophone
+                                    }
+                                    present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                                        openSettings()
+                                    })]), nil)
+                                    if case .voiceCall = microphoneSubject {
+                                        displayNotificationFromBackground(text)
+                                    }
                                 }
                             }
                         })
@@ -324,7 +322,7 @@ public final class DeviceAccess {
                                     case .wallpaper:
                                         text = presentationData.strings.AccessDenied_Wallpapers
                                 }
-                                present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                                present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                                     openSettings()
                                 })]), nil)
                             }
@@ -340,6 +338,8 @@ public final class DeviceAccess {
                                     value = false
                                 case .authorized:
                                     value = true
+                                @unknown default:
+                                    fatalError()
                             }
                             let _ = cachedMediaLibraryAccessStatus.swap(value)
                             continueWithValue(value)
@@ -358,7 +358,7 @@ public final class DeviceAccess {
                                     completion(false)
                                     if let presentationData = presentationData {
                                         let text = presentationData.strings.AccessDenied_LocationAlwaysDenied
-                                        present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                                        present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                                             openSettings()
                                         })]), nil)
                                     }
@@ -377,13 +377,26 @@ public final class DeviceAccess {
                                 } else {
                                     text = presentationData.strings.AccessDenied_LocationDisabled
                                 }
-                                present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                                present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.AccessDenied_Title, text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                                     openSettings()
                                 })]), nil)
                             }
                         case .notDetermined:
-                            completion(true)
-                    }
+                            switch locationSubject {
+                                case .send, .tracking:
+                                    locationManager?.requestWhenInUseAuthorization(completion: { status in
+                                        completion(status == .authorizedWhenInUse || status == .authorizedAlways)
+                                    })
+                                case .live:
+                                    locationManager?.requestAlwaysAuthorization(completion: { status in
+                                        completion(status == .authorizedAlways)
+                                    })
+                                default:
+                                    break
+                            }
+                        @unknown default:
+                            fatalError()
+                }
                 case .contacts:
                     let _ = (self.contactsPromise.get()
                     |> take(1)
@@ -448,7 +461,7 @@ public final class DeviceAccess {
                     }
                 case .cellularData:
                     if let presentationData = presentationData {
-                        present(standardTextAlertController(theme: AlertControllerTheme(presentationTheme: presentationData.theme), title: presentationData.strings.Permissions_CellularDataTitle_v0, text: presentationData.strings.Permissions_CellularDataText_v0, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
+                        present(standardTextAlertController(theme: AlertControllerTheme(presentationData: presentationData), title: presentationData.strings.Permissions_CellularDataTitle_v0, text: presentationData.strings.Permissions_CellularDataText_v0, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_NotNow, action: {}), TextAlertAction(type: .genericAction, title: presentationData.strings.AccessDenied_Settings, action: {
                             openSettings()
                         })]), nil)
                     }

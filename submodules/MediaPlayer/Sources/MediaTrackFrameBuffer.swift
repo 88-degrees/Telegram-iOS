@@ -108,6 +108,8 @@ public final class MediaTrackFrameBuffer {
             }
             
             bufferedDuration = CMTimeGetSeconds(bufferedUntilTime) - timestamp
+        } else if self.endOfStream {
+            return .finished(at: CMTimeGetSeconds(self.duration))
         }
         
         let minTimestamp = timestamp - 1.0
@@ -144,6 +146,10 @@ public final class MediaTrackFrameBuffer {
     }
     
     public func takeFrame() -> MediaTrackFrameResult {
+        if let decodedFrame = self.decoder.takeQueuedFrame() {
+            return .frame(decodedFrame)
+        }
+        
         if !self.frames.isEmpty {
             let frame = self.frames.removeFirst()
             if let decodedFrame = self.decoder.decode(frame: frame) {

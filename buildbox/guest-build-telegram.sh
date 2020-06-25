@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -x
+
 if [ -z "BUILD_NUMBER" ]; then
 	echo "BUILD_NUMBER is not set"
 	exit 1
@@ -10,12 +12,13 @@ if [ -z "COMMIT_ID" ]; then
 	exit 1
 fi
 
-if [ "$1" == "hockeyapp" ]; then
-	FASTLANE_BUILD_CONFIGURATION="internalhockeyapp"
-	CERTS_PATH="codesigning_data/certs"
-	PROFILES_PATH="codesigning_data/profiles"
+if [ "$1" == "hockeyapp" ] || [ "$1" == "testinghockeyapp" ]; then
+	CERTS_PATH="$HOME/codesigning_data/certs"
+	PROFILES_PATH="$HOME/codesigning_data/profiles"
+elif [ "$1" == "testinghockeyapp-local" ]; then
+	CERTS_PATH="$HOME/codesigning_data/certs"
+	PROFILES_PATH="$HOME/codesigning_data/profiles"
 elif [ "$1" == "appstore" ]; then
-	FASTLANE_BUILD_CONFIGURATION="testflight_llc"
 	if [ -z "$TELEGRAM_BUILD_APPSTORE_PASSWORD" ]; then
 		echo "TELEGRAM_BUILD_APPSTORE_PASSWORD is not set"
 		exit 1
@@ -24,18 +27,11 @@ elif [ "$1" == "appstore" ]; then
 		echo "TELEGRAM_BUILD_APPSTORE_TEAM_NAME is not set"
 		exit 1
 	fi
-	FASTLANE_PASSWORD="$TELEGRAM_BUILD_APPSTORE_PASSWORD"
-	FASTLANE_ITC_TEAM_NAME="$TELEGRAM_BUILD_APPSTORE_TEAM_NAME"
-	CERTS_PATH="codesigning_data/certs"
-	PROFILES_PATH="codesigning_data/profiles"
+	CERTS_PATH="$HOME/codesigning_data/certs"
+	PROFILES_PATH="$HOME/codesigning_data/profiles"
 elif [ "$1" == "verify" ]; then
-	FASTLANE_BUILD_CONFIGURATION="build_for_appstore"
-	CERTS_PATH="codesigning_data/certs"
-	PROFILES_PATH="codesigning_data/profiles"
-elif [ "$1" == "verify-local" ]; then
-	FASTLANE_BUILD_CONFIGURATION="build_for_appstore"
-	CERTS_PATH="buildbox/fake-codesigning/certs"
-	PROFILES_PATH="buildbox/fake-codesigning/profiles"
+	CERTS_PATH="build-system/fake-codesigning/certs/distribution"
+	PROFILES_PATH="build-system/fake-codesigning/profiles"
 else
 	echo "Unknown configuration $1"
 	exit 1
@@ -52,9 +48,48 @@ security list-keychains -d user -s "$MY_KEYCHAIN" $(security list-keychains -d u
 security set-keychain-settings "$MY_KEYCHAIN"
 security unlock-keychain -p "$MY_KEYCHAIN_PASSWORD" "$MY_KEYCHAIN"
 
+SOURCE_PATH="telegram-ios"
+
+if [ -d "$SOURCE_PATH" ]; then
+	echo "Directory $SOURCE_PATH should not exist"
+	exit 1
+fi
+
+mkdir "$SOURCE_PATH"
+
+USE_RAMDISK="0"
+
+if [ "$USE_RAMDISK" == "1" ]; then
+	SIZE_IN_BLOCKS=$((12*1024*1024*1024/512))
+	DEV=`hdid -nomount ram://$SIZE_IN_BLOCKS`
+
+	if [ $? -eq 0 ]; then
+		newfs_hfs -v 'ram disk' $DEV
+		eval `/usr/bin/stat -s "$SOURCE_PATH"`
+		mount -t hfs -o union -o nobrowse -o nodev -o noatime $DEV "$SOURCE_PATH"
+		chown $st_uid:$st_gid "$SOURCE_PATH"
+		chmod $st_mode "$SOURCE_PATH"
+	else
+		echo "Error creating ramdisk"
+		exit 1
+	fi
+fi
+
+echo "Unpacking files..."
+
+mkdir -p "$SOURCE_PATH/buildbox"
+mkdir -p "$SOURCE_PATH/buildbox/transient-data"
+cp -r "$HOME/codesigning_teams" "$SOURCE_PATH/buildbox/transient-data/teams"
+
+BASE_DIR=$(pwd)
+cd "$SOURCE_PATH"
+tar -xf "../source.tar"
+
 for f in $(ls "$CERTS_PATH"); do
-	fastlane run import_certificate "certificate_path:$CERTS_PATH/$f" keychain_name:"$MY_KEYCHAIN" keychain_password:"$MY_KEYCHAIN_PASSWORD" log_output:true
+	security import "$CERTS_PATH/$f" -k "$MY_KEYCHAIN" -P "" -T /usr/bin/codesign -T /usr/bin/security
 done
+
+security set-key-partition-list -S apple-tool:,apple: -k "$MY_KEYCHAIN_PASSWORD" "$MY_KEYCHAIN"
 
 mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
 
@@ -64,19 +99,34 @@ for f in $(ls "$PROFILES_PATH"); do
 	cp -f "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$uuid.mobileprovision"
 done
 
-if [ "$1" == "verify-local" ]; then
-	fastlane "$FASTLANE_BUILD_CONFIGURATION"
+if [ "$1" == "hockeyapp" ]; then
+	BUILD_ENV_SCRIPT="../telegram-ios-shared/buildbox/bin/internal.sh"
+	APP_TARGET="app_arm64"
+elif [ "$1" == "appstore" ]; then
+	BUILD_ENV_SCRIPT="../telegram-ios-shared/buildbox/bin/appstore.sh"
+	APP_TARGET="app"
+elif [ "$1" == "verify" ]; then
+	BUILD_ENV_SCRIPT="build-system/verify.sh"
+	APP_TARGET="app"
+	export CODESIGNING_DATA_PATH="build-system/fake-codesigning"
+	export CODESIGNING_CERTS_VARIANT="distribution"
+	export CODESIGNING_PROFILES_VARIANT="appstore"
 else
-	SOURCE_PATH="telegram-ios"
-
-	if [ -d "$SOURCE_PATH" ]; then
-		echo "Directory $SOURCE_PATH should not exist"
-		exit 1
-	fi
-
-	echo "Unpacking files..."
-	tar -xf "source.tar"
-
-	cd "$SOURCE_PATH"
-	FASTLANE_PASSWORD="$FASTLANE_PASSWORD" FASTLANE_ITC_TEAM_NAME="$FASTLANE_ITC_TEAM_NAME" fastlane "$FASTLANE_BUILD_CONFIGURATION" build_number:"$BUILD_NUMBER" commit_hash:"$COMMIT_ID" commit_author:"$COMMIT_AUTHOR"
+	echo "Unsupported configuration $1"
+	exit 1
 fi
+
+if [ -d "$BUCK_DIR_CACHE" ]; then
+	sudo chown telegram "$BUCK_DIR_CACHE"
+fi
+
+BUCK="$(pwd)/tools/buck" BUCK_HTTP_CACHE="$BUCK_HTTP_CACHE" BUCK_CACHE_MODE="$BUCK_CACHE_MODE" BUCK_DIR_CACHE="$BUCK_DIR_CACHE" LOCAL_CODESIGNING=1 sh "$BUILD_ENV_SCRIPT" make "$APP_TARGET"
+
+OUTPUT_PATH="build/artifacts"
+rm -rf "$OUTPUT_PATH"
+mkdir -p "$OUTPUT_PATH"
+
+cp "build/Telegram_signed.ipa" "./$OUTPUT_PATH/Telegram.ipa"
+cp "build/DSYMs.zip" "./$OUTPUT_PATH/Telegram.DSYMs.zip"
+
+cd "$BASE_DIR"
